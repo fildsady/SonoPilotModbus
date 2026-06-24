@@ -111,8 +111,7 @@ public partial class MainWindow : Window
 
         try
         {
-            // Read status registers 0x0000-0x0008 (9 regs)
-            var regs = await Task.Run(() => _master.ReadHoldingRegisters(_slaveId, REG_STATE, 9));
+            var regs = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_STATE, 9); } });
 
             string[] states = ["Stop", "Play", "Error", "Pause"];
             string[] repeats = ["All", "One", "Off", "Single", "Random"];
@@ -139,17 +138,14 @@ public partial class MainWindow : Window
             BtnAutoplay.Content = _autoplayState ? "Auto: On" : "Auto: Off";
             TxtSD.Text = $"SD: {(regs[7] != 0 ? "OK" : "—")}";
 
-            // Read uptime + temp
-            var info = await Task.Run(() => _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 2));
+            var info = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 2); } });
             TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
             TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
 
-            // Read heap
-            var heap = await Task.Run(() => _master.ReadHoldingRegisters(_slaveId, REG_HEAP_FREE, 1));
+            var heap = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_HEAP_FREE, 1); } });
             TxtHeap.Text = $"Heap: {heap[0] * 16}B";
 
-            // Read track name (16 regs = 32 chars)
-            var name = await Task.Run(() => _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16));
+            var name = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); } });
             var sb = new StringBuilder();
             foreach (var r in name)
             {
@@ -166,15 +162,25 @@ public partial class MainWindow : Window
         }
     }
 
+    private readonly object _modbusLock = new();
     private void WriteReg(ushort addr, ushort value)
     {
         if (!_connected || _master == null) return;
-        try
+        Task.Run(() =>
         {
-            Task.Run(() => _master!.WriteSingleRegister(_slaveId, addr, value));
-            Log($"Write [0x{addr:X4}] = {value}");
-        }
-        catch (Exception ex) { Log($"Write failed: {ex.Message}"); }
+            lock (_modbusLock)
+            {
+                try
+                {
+                    _master!.WriteSingleRegister(_slaveId, addr, value);
+                    Dispatcher.BeginInvoke(() => Log($"Write [0x{addr:X4}] = {value}"));
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.BeginInvoke(() => Log($"Write failed: {ex.Message}"));
+                }
+            }
+        });
     }
 
     // Control buttons
@@ -186,6 +192,7 @@ public partial class MainWindow : Window
 
     private void SliderVol_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (TxtVol == null) return;
         TxtVol.Text = $"{(int)SliderVol.Value}%";
         if (_suppressVolEvent || !SliderVol.IsMouseCaptureWithin) return;
         WriteReg(REG_VOLUME, (ushort)SliderVol.Value);
@@ -225,7 +232,7 @@ public partial class MainWindow : Window
         {
             ushort addr = Convert.ToUInt16(TxtRegAddr.Text, 16);
             ushort count = ushort.Parse(TxtRegCount.Text);
-            var regs = await Task.Run(() => _master!.ReadHoldingRegisters(_slaveId, addr, count));
+            var regs = await Task.Run(() => { lock (_modbusLock) { return _master!.ReadHoldingRegisters(_slaveId, addr, count); } });
             var sb = new StringBuilder();
             foreach (var r in regs) sb.Append($"0x{r:X4} ");
             TxtRegResult.Text = sb.ToString();
