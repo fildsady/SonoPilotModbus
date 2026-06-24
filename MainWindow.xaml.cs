@@ -1,3 +1,4 @@
+using System.IO;
 using System.IO.Ports;
 using System.Text;
 using System.Windows;
@@ -35,10 +36,20 @@ public partial class MainWindow : Window
     const ushort REG_HEAP_FREE   = 0x0025;
     const ushort REG_TRACK_NAME  = 0x0100;
 
+    private static readonly string SettingsPath =
+        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.txt");
+    private static readonly string WindowPath =
+        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "window.txt");
+
     public MainWindow()
     {
         InitializeComponent();
+        RestoreWindowState();
+        SizeChanged += (_, _) => SaveWindowState();
+        LocationChanged += (_, _) => SaveWindowState();
+        StateChanged += (_, _) => SaveWindowState();
         RefreshPorts();
+        LoadSettings();
     }
 
     private void RefreshPorts()
@@ -47,6 +58,66 @@ public partial class MainWindow : Window
         foreach (var p in SerialPort.GetPortNames())
             CmbPort.Items.Add(p);
         if (CmbPort.Items.Count > 0) CmbPort.SelectedIndex = 0;
+    }
+
+    private void SaveWindowState()
+    {
+        try
+        {
+            if (!IsLoaded) return;
+            double l = Left, t = Top, w = Width, h = Height;
+            if (double.IsNaN(l) || double.IsInfinity(l) || w < 100 || h < 100) return;
+            if (WindowState == WindowState.Maximized)
+            {
+                var b = RestoreBounds;
+                if (!double.IsInfinity(b.Left) && !double.IsNaN(b.Left) && b.Width >= 100)
+                { l = b.Left; t = b.Top; w = b.Width; h = b.Height; }
+            }
+            File.WriteAllText(WindowPath,
+                $"{l:F0},{t:F0},{w:F0},{h:F0},{(WindowState == WindowState.Maximized ? 1 : 0)}");
+        }
+        catch { }
+    }
+
+    private void RestoreWindowState()
+    {
+        try
+        {
+            if (!File.Exists(WindowPath)) { WindowStartupLocation = WindowStartupLocation.CenterScreen; return; }
+            var parts = File.ReadAllText(WindowPath).Trim().Split(',');
+            if (parts.Length < 5) { WindowStartupLocation = WindowStartupLocation.CenterScreen; return; }
+            Left = double.Parse(parts[0]); Top = double.Parse(parts[1]);
+            Width = double.Parse(parts[2]); Height = double.Parse(parts[3]);
+            if (parts[4] == "1") WindowState = WindowState.Maximized;
+        }
+        catch { WindowStartupLocation = WindowStartupLocation.CenterScreen; }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            string port = CmbPort.SelectedItem?.ToString() ?? "";
+            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text}");
+        }
+        catch { }
+    }
+
+    private void LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+            var parts = File.ReadAllText(SettingsPath).Trim().Split(',');
+            if (parts.Length >= 1)
+            {
+                for (int i = 0; i < CmbPort.Items.Count; i++)
+                    if (CmbPort.Items[i].ToString() == parts[0])
+                    { CmbPort.SelectedIndex = i; break; }
+            }
+            if (parts.Length >= 2) TxtSlaveId.Text = parts[1];
+        }
+        catch { }
     }
 
     private void BtnRefresh_Click(object sender, RoutedEventArgs e) => RefreshPorts();
@@ -79,6 +150,7 @@ public partial class MainWindow : Window
             TxtStatus.Text = $"Connected: {portName} (ID={_slaveId})";
             TxtStatus.Foreground = FindResource("CatGreen") as System.Windows.Media.Brush;
             BtnConnect.Content = "Disconnect";
+            SaveSettings();
             Log($"Connected to {portName} slave={_slaveId}");
 
             _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -263,6 +335,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        SaveWindowState();
+        SaveSettings();
         Disconnect();
         base.OnClosed(e);
     }
