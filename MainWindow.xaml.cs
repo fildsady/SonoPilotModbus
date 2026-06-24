@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     const ushort REG_TEMP_X10    = 0x0021;
     const ushort REG_HEAP_FREE   = 0x0025;
     const ushort REG_TRACK_NAME  = 0x0100;
+    const ushort REG_SAMPLE_RATE = 0x0026;
 
     private static readonly string SettingsPath =
         Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.txt");
@@ -214,8 +215,8 @@ public partial class MainWindow : Window
             TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
             TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
 
-            var heap = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_HEAP_FREE, 1); } });
-            TxtHeap.Text = $"Heap: {heap[0] * 16}B";
+            var sr = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_SAMPLE_RATE, 1); } });
+            uint sampleRate = (uint)sr[0] * 100;
 
             var name = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); } });
             var sb = new StringBuilder();
@@ -226,7 +227,13 @@ public partial class MainWindow : Window
                 if (hi != 0) sb.Append(hi);
                 if (lo != 0) sb.Append(lo);
             }
-            TxtTrackName.Text = $"♪ {sb}";
+            string trackName = sb.ToString().TrimEnd('\0');
+            TxtTrackName.Text = $"♪ {trackName}";
+
+            string ext = "";
+            int dot = trackName.LastIndexOf('.');
+            if (dot >= 0) ext = trackName[(dot + 1)..].ToUpper();
+            TxtFormat.Text = sampleRate > 0 ? $"{ext} {sampleRate / 1000}kHz" : "—";
         }
         catch (Exception ex)
         {

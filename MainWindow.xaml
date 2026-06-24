@@ -67,7 +67,7 @@
                         <TextBlock x:Name="TxtUptime" Text="Uptime: —"/>
                         <TextBlock x:Name="TxtTemp" Text="Temp: —"/>
                         <TextBlock x:Name="TxtSD" Text="SD: —"/>
-                        <TextBlock x:Name="TxtHeap" Text="Heap: —"/>
+                        <TextBlock x:Name="TxtFormat" Text="Format: —"/>
                     </StackPanel>
                 </Grid>
                 <TextBlock x:Name="TxtTrackName" Text="♪ —" FontSize="14" Foreground="{StaticResource CatYellow}" Margin="0,6,0,0"/>
