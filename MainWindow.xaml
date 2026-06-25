@@ -43,6 +43,21 @@
                              Background="{StaticResource CatSurface0}" Foreground="{StaticResource CatText}"/>
                     <Button x:Name="BtnConnect" Content="Connect" Click="BtnConnect_Click"/>
                     <Button Content="⟳" Click="BtnRefresh_Click" Width="32"/>
+                    <CheckBox x:Name="ChkRts485" Content="RS-485 (RTS→DE)" VerticalAlignment="Center" Margin="8,0,0,0"
+                              Foreground="{StaticResource CatSubtext0}"/>
+                </WrapPanel>
+                <WrapPanel Margin="0,4,0,0">
+                    <TextBlock Text="Baud:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <ComboBox x:Name="CmbBaud" Width="90" Height="26" SelectedIndex="4">
+                        <ComboBoxItem Content="9600"/>
+                        <ComboBoxItem Content="19200"/>
+                        <ComboBoxItem Content="38400"/>
+                        <ComboBoxItem Content="57600"/>
+                        <ComboBoxItem Content="115200"/>
+                        <ComboBoxItem Content="230400"/>
+                        <ComboBoxItem Content="460800"/>
+                    </ComboBox>
+                    <Button x:Name="BtnSetBaud" Content="Set Device" Click="BtnSetBaud_Click" Margin="4,0,0,0"/>
                 </WrapPanel>
                 <TextBlock x:Name="TxtStatus" Text="Disconnected" Foreground="{StaticResource CatRed}" Margin="0,4,0,0"/>
             </StackPanel>

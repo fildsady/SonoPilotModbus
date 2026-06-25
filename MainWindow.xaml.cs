@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Ports;
+using System.Threading;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,6 +20,7 @@ public partial class MainWindow : Window
     private bool _suppressRepeatEvent;
     private bool _monoState;
     private bool _autoplayState = true;
+    private static readonly int[] BaudTable = { 9600, 19200, 38400, 57600, 115200, 230400, 460800 };
 
     // Register addresses (match firmware modbus_rtu.h)
     const ushort REG_STATE       = 0x0000;
@@ -36,6 +38,7 @@ public partial class MainWindow : Window
     const ushort REG_HEAP_FREE   = 0x0025;
     const ushort REG_TRACK_NAME  = 0x0100;
     const ushort REG_SAMPLE_RATE = 0x0026;
+    const ushort REG_BAUDRATE    = 0x0027;
 
     private static readonly string SettingsPath =
         Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.txt");
@@ -99,7 +102,8 @@ public partial class MainWindow : Window
         try
         {
             string port = CmbPort.SelectedItem?.ToString() ?? "";
-            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text}");
+            string rts = ChkRts485.IsChecked == true ? "1" : "0";
+            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text},{rts},{CmbBaud.SelectedIndex}");
         }
         catch { }
     }
@@ -117,6 +121,9 @@ public partial class MainWindow : Window
                     { CmbPort.SelectedIndex = i; break; }
             }
             if (parts.Length >= 2) TxtSlaveId.Text = parts[1];
+            if (parts.Length >= 3) ChkRts485.IsChecked = parts[2] == "1";
+            if (parts.Length >= 4 && int.TryParse(parts[3], out int bi) && bi >= 0 && bi < BaudTable.Length)
+                CmbBaud.SelectedIndex = bi;
         }
         catch { }
     }
@@ -137,18 +144,28 @@ public partial class MainWindow : Window
 
         try
         {
-            _port = new SerialPort(portName, 115200, Parity.None, 8, StopBits.One)
+            int baudIdx = CmbBaud.SelectedIndex;
+            if (baudIdx < 0 || baudIdx >= BaudTable.Length) baudIdx = 4;
+            int baud = BaudTable[baudIdx];
+            _port = new SerialPort(portName, baud, Parity.None, 8, StopBits.One)
             {
                 ReadTimeout = 1000,
                 WriteTimeout = 1000
             };
+            if (ChkRts485.IsChecked == true)
+            {
+                _port.Handshake = Handshake.None;
+                _port.RtsEnable = false;
+            }
             _port.Open();
             _master = ModbusSerialMaster.CreateRtu(_port);
             _master.Transport.ReadTimeout = 1000;
             _master.Transport.Retries = 1;
 
+            _rts485 = ChkRts485.IsChecked == true;
             _connected = true;
-            TxtStatus.Text = $"Connected: {portName} (ID={_slaveId})";
+            string modeStr = _rts485 ? " [RS-485 RTS]" : "";
+            TxtStatus.Text = $"Connected: {portName} (ID={_slaveId}){modeStr}";
             TxtStatus.Foreground = FindResource("CatGreen") as System.Windows.Media.Brush;
             BtnConnect.Content = "Disconnect";
             SaveSettings();
@@ -184,7 +201,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var regs = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_STATE, 9); } });
+            var regs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_STATE, 9); Rts485Post(); return r; } });
 
             string[] states = ["Stop", "Play", "Error", "Pause"];
             string[] repeats = ["All", "One", "Off", "Single", "Random"];
@@ -211,14 +228,14 @@ public partial class MainWindow : Window
             BtnAutoplay.Content = _autoplayState ? "Auto: On" : "Auto: Off";
             TxtSD.Text = $"SD: {(regs[7] != 0 ? "OK" : "—")}";
 
-            var info = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 2); } });
+            var info = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 2); Rts485Post(); return r; } });
             TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
             TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
 
-            var sr = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_SAMPLE_RATE, 1); } });
+            var sr = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_SAMPLE_RATE, 1); Rts485Post(); return r; } });
             uint sampleRate = (uint)sr[0] * 100;
 
-            var name = await Task.Run(() => { lock (_modbusLock) { return _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); } });
+            var name = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); Rts485Post(); return r; } });
             var sb = new StringBuilder();
             foreach (var r in name)
             {
@@ -242,6 +259,11 @@ public partial class MainWindow : Window
     }
 
     private readonly object _modbusLock = new();
+    private bool _rts485;
+
+    private void Rts485Pre()  { if (_rts485 && _port != null) _port.RtsEnable = true; }
+    private void Rts485Post() { if (_rts485 && _port != null) { _port.BaseStream.Flush(); Thread.Sleep(2); _port.RtsEnable = false; } }
+
     private void WriteReg(ushort addr, ushort value)
     {
         if (!_connected || _master == null) return;
@@ -251,11 +273,14 @@ public partial class MainWindow : Window
             {
                 try
                 {
+                    Rts485Pre();
                     _master!.WriteSingleRegister(_slaveId, addr, value);
+                    Rts485Post();
                     Dispatcher.BeginInvoke(() => Log($"Write [0x{addr:X4}] = {value}"));
                 }
                 catch (Exception ex)
                 {
+                    Rts485Post();
                     Dispatcher.BeginInvoke(() => Log($"Write failed: {ex.Message}"));
                 }
             }
@@ -303,6 +328,36 @@ public partial class MainWindow : Window
             WriteReg(REG_GOTO_INDEX, idx);
     }
 
+    private void BtnSetBaud_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_connected || _master == null || _port == null) return;
+        int idx = CmbBaud.SelectedIndex;
+        if (idx < 0 || idx >= BaudTable.Length) return;
+
+        WriteReg(REG_BAUDRATE, (ushort)idx);
+
+        Task.Run(() =>
+        {
+            Thread.Sleep(200);
+            lock (_modbusLock)
+            {
+                try
+                {
+                    _port!.BaudRate = BaudTable[idx];
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        Log($"Baud changed to {BaudTable[idx]} (both sides)");
+                        SaveSettings();
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.BeginInvoke(() => Log($"Baud switch failed: {ex.Message}"));
+                }
+            }
+        });
+    }
+
     // Raw register
     private async void BtnRegRead_Click(object sender, RoutedEventArgs e)
     {
@@ -311,7 +366,7 @@ public partial class MainWindow : Window
         {
             ushort addr = Convert.ToUInt16(TxtRegAddr.Text, 16);
             ushort count = ushort.Parse(TxtRegCount.Text);
-            var regs = await Task.Run(() => { lock (_modbusLock) { return _master!.ReadHoldingRegisters(_slaveId, addr, count); } });
+            var regs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master!.ReadHoldingRegisters(_slaveId, addr, count); Rts485Post(); return r; } });
             var sb = new StringBuilder();
             foreach (var r in regs) sb.Append($"0x{r:X4} ");
             TxtRegResult.Text = sb.ToString();
