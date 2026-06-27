@@ -21,6 +21,7 @@ public partial class MainWindow : Window
     private DateTime _lastWriteTime = DateTime.MinValue;
     private bool _monoState;
     private bool _autoplayState = true;
+    private bool _bridgeMode;
     private static readonly int[] BaudTable = { 9600, 19200, 38400, 57600, 115200, 230400, 460800 };
 
     // Register addresses (match firmware modbus_rtu.h)
@@ -112,7 +113,8 @@ public partial class MainWindow : Window
         {
             string port = CmbPort.SelectedItem?.ToString() ?? "";
             string rts = ChkRts485.IsChecked == true ? "1" : "0";
-            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text},{rts},{CmbBaud.SelectedIndex}");
+            string brg = ChkBridge.IsChecked == true ? "1" : "0";
+            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text},{rts},{CmbBaud.SelectedIndex},{brg}");
         }
         catch { }
     }
@@ -133,6 +135,7 @@ public partial class MainWindow : Window
             if (parts.Length >= 3) ChkRts485.IsChecked = parts[2] == "1";
             if (parts.Length >= 4 && int.TryParse(parts[3], out int bi) && bi >= 0 && bi < BaudTable.Length)
                 CmbBaud.SelectedIndex = bi;
+            if (parts.Length >= 5) ChkBridge.IsChecked = parts[4] == "1";
         }
         catch { }
     }
@@ -167,13 +170,15 @@ public partial class MainWindow : Window
                 _port.RtsEnable = false;
             }
             _port.Open();
+            _rts485 = ChkRts485.IsChecked == true;
+            _bridgeMode = ChkBridge.IsChecked == true;
+
             _master = ModbusSerialMaster.CreateRtu(_port);
             _master.Transport.ReadTimeout = 500;
             _master.Transport.Retries = 0;
 
-            _rts485 = ChkRts485.IsChecked == true;
             _connected = true;
-            string modeStr = _rts485 ? " [RS-485 RTS]" : "";
+            string modeStr = _bridgeMode ? " [Bridge]" : _rts485 ? " [RS-485]" : "";
             TxtStatus.Text = $"Connected: {portName} (ID={_slaveId}){modeStr}";
             TxtStatus.Foreground = FindResource("CatGreen") as System.Windows.Media.Brush;
             BtnConnect.Content = "Disconnect";
@@ -217,7 +222,7 @@ public partial class MainWindow : Window
         try
         {
             // Status + settings: 0x0000-0x0008 (9 regs)
-            var regs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_STATE, 9); Rts485Post(); return r; } });
+            var regs = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_STATE, 9); return r; } });
 
             int state = regs[0];
             _lastState = state;
@@ -248,7 +253,7 @@ public partial class MainWindow : Window
             TxtSD.Text = $"SD: {(regs[7] != 0 ? "OK" : "—")}";
 
             // Info: temp, sample rate, track name
-            var info = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 8); Rts485Post(); return r; } });
+            var info = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_UPTIME, 8); return r; } });
             TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
             TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
             TxtFwVer.Text = $"FW: {info[2]}.{info[3]}";
@@ -258,7 +263,7 @@ public partial class MainWindow : Window
             // RTC
             try
             {
-                var rtc = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_RTC_YEAR, 6); Rts485Post(); return r; } });
+                var rtc = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_RTC_YEAR, 6); return r; } });
                 string[] dayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
                 string dow = "";
                 try { dow = dayNames[(int)new DateTime(rtc[0], rtc[1], rtc[2]).DayOfWeek] + " "; } catch { }
@@ -271,7 +276,7 @@ public partial class MainWindow : Window
             catch { TxtRtcDisplay.Text = "RTC: --"; }
 
             // Track name
-            var nameRegs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); Rts485Post(); return r; } });
+            var nameRegs = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_TRACK_NAME, 16); return r; } });
             var sb = new StringBuilder();
             foreach (var r in nameRegs)
             {
@@ -298,12 +303,123 @@ public partial class MainWindow : Window
     private readonly object _modbusLock = new();
     private bool _rts485;
 
-    private void Rts485Pre()  { if (_rts485 && _port != null) _port.RtsEnable = true; }
-    private void Rts485Post() { if (_rts485 && _port != null) { _port.BaseStream.Flush(); Thread.Sleep(2); _port.RtsEnable = false; } }
+    private void Rts485Pre()  { if (_rts485 && !_bridgeMode && _port != null) _port.RtsEnable = true; }
+    private void Rts485Post() { if (_rts485 && !_bridgeMode && _port != null) { _port.BaseStream.Flush(); Thread.Sleep(2); _port.RtsEnable = false; } }
+
+    private ushort[] ReadRegs(ushort start, ushort count)
+    {
+        if (_bridgeMode)
+            return BridgeReadHolding(_slaveId, start, count) ?? [];
+        Rts485Pre();
+        var r = _master!.ReadHoldingRegisters(_slaveId, start, count);
+        Rts485Post();
+        return r;
+    }
+
+    /* ── Bridge mode: raw Modbus over 0x03/0x04 framing ─────────────── */
+    private static ushort Crc16(byte[] data, int len)
+    {
+        ushort crc = 0xFFFF;
+        for (int i = 0; i < len; i++)
+        {
+            crc ^= data[i];
+            for (int j = 0; j < 8; j++)
+                crc = (crc & 1) != 0 ? (ushort)((crc >> 1) ^ 0xA001) : (ushort)(crc >> 1);
+        }
+        return crc;
+    }
+
+    private ushort[]? BridgeReadHolding(byte slave, ushort start, ushort count)
+    {
+        byte[] req = new byte[8];
+        req[0] = slave; req[1] = 0x03;
+        req[2] = (byte)(start >> 8); req[3] = (byte)(start & 0xFF);
+        req[4] = (byte)(count >> 8); req[5] = (byte)(count & 0xFF);
+        var crc = Crc16(req, 6);
+        req[6] = (byte)(crc & 0xFF); req[7] = (byte)(crc >> 8);
+
+        byte[]? resp = BridgeSendRecv(req);
+        if (resp == null || resp.Length < 5 || resp[1] != 0x03) return null;
+
+        int bytes = resp[2];
+        int n = bytes / 2;
+        var regs = new ushort[n];
+        for (int i = 0; i < n; i++)
+            regs[i] = (ushort)((resp[3 + i * 2] << 8) | resp[3 + i * 2 + 1]);
+        return regs;
+    }
+
+    private void BridgeWriteSingle(byte slave, ushort addr, ushort value)
+    {
+        byte[] req = new byte[8];
+        req[0] = slave; req[1] = 0x06;
+        req[2] = (byte)(addr >> 8); req[3] = (byte)(addr & 0xFF);
+        req[4] = (byte)(value >> 8); req[5] = (byte)(value & 0xFF);
+        var crc = Crc16(req, 6);
+        req[6] = (byte)(crc & 0xFF); req[7] = (byte)(crc >> 8);
+        BridgeSendRecv(req);
+    }
+
+    private void BridgeWriteMultiple(byte slave, ushort addr, ushort[] values)
+    {
+        int count = values.Length;
+        byte[] req = new byte[9 + count * 2];
+        req[0] = slave; req[1] = 0x10;
+        req[2] = (byte)(addr >> 8); req[3] = (byte)(addr & 0xFF);
+        req[4] = (byte)(count >> 8); req[5] = (byte)(count & 0xFF);
+        req[6] = (byte)(count * 2);
+        for (int i = 0; i < count; i++)
+        { req[7 + i * 2] = (byte)(values[i] >> 8); req[7 + i * 2 + 1] = (byte)(values[i] & 0xFF); }
+        var crc = Crc16(req, 7 + count * 2);
+        req[7 + count * 2] = (byte)(crc & 0xFF); req[7 + count * 2 + 1] = (byte)(crc >> 8);
+        BridgeSendRecv(req);
+    }
+
+    private byte[]? BridgeSendRecv(byte[] modbusFrame)
+    {
+        if (_port == null) return null;
+        try
+        {
+            // Wrap: [0x03, len, frame...]
+            byte[] pkt = new byte[2 + modbusFrame.Length];
+            pkt[0] = 0x03;
+            pkt[1] = (byte)modbusFrame.Length;
+            Array.Copy(modbusFrame, 0, pkt, 2, modbusFrame.Length);
+
+            _port.DiscardInBuffer();
+            _port.BaseStream.Write(pkt, 0, pkt.Length);
+            _port.BaseStream.Flush();
+
+            // Read response: [0x04, len, frame...]
+            var start = DateTime.Now;
+            while (_port.BytesToRead < 2)
+            {
+                if ((DateTime.Now - start).TotalMilliseconds > 1000) return null;
+                Thread.Sleep(1);
+            }
+
+            int cmd = _port.BaseStream.ReadByte();
+            if (cmd != 0x04) return null;
+            int len = _port.BaseStream.ReadByte();
+            if (len <= 0 || len > 250) return null;
+
+            byte[] resp = new byte[len];
+            int read = 0;
+            while (read < len)
+            {
+                if ((DateTime.Now - start).TotalMilliseconds > 1500) return null;
+                if (_port.BytesToRead > 0)
+                    read += _port.BaseStream.Read(resp, read, len - read);
+                else Thread.Sleep(1);
+            }
+            return resp;
+        }
+        catch { return null; }
+    }
 
     private void WriteReg(ushort addr, ushort value)
     {
-        if (!_connected || _master == null) return;
+        if (!_connected) return;
         _lastWriteTime = DateTime.Now;
         Task.Run(() =>
         {
@@ -311,21 +427,19 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    Rts485Pre();
-                    _master!.WriteSingleRegister(_slaveId, addr, value);
-                    Rts485Post();
+                    if (_bridgeMode)
+                        BridgeWriteSingle(_slaveId, addr, value);
+                    else
+                    { Rts485Pre(); _master!.WriteSingleRegister(_slaveId, addr, value); Rts485Post(); }
                 }
-                catch
-                {
-                    Rts485Post();
-                }
+                catch { Rts485Post(); }
             }
         });
     }
 
     private void WriteRegs(ushort addr, ushort[] values)
     {
-        if (!_connected || _master == null) return;
+        if (!_connected) return;
         _lastWriteTime = DateTime.Now;
         Task.Run(() =>
         {
@@ -333,14 +447,12 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    Rts485Pre();
-                    _master!.WriteMultipleRegisters(_slaveId, addr, values);
-                    Rts485Post();
+                    if (_bridgeMode)
+                        BridgeWriteMultiple(_slaveId, addr, values);
+                    else
+                    { Rts485Pre(); _master!.WriteMultipleRegisters(_slaveId, addr, values); Rts485Post(); }
                 }
-                catch
-                {
-                    Rts485Post();
-                }
+                catch { Rts485Post(); }
             }
         });
     }
@@ -452,12 +564,12 @@ public partial class MainWindow : Window
     // Raw register
     private async void BtnRegRead_Click(object sender, RoutedEventArgs e)
     {
-        if (!_connected || _master == null) return;
+        if (!_connected) return;
         try
         {
             ushort addr = Convert.ToUInt16(TxtRegAddr.Text, 16);
             ushort count = ushort.Parse(TxtRegCount.Text);
-            var regs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master!.ReadHoldingRegisters(_slaveId, addr, count); Rts485Post(); return r; } });
+            var regs = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs(addr, count); return r; } });
             var sb = new StringBuilder();
             foreach (var r in regs) sb.Append($"0x{r:X4} ");
             TxtRegResult.Text = sb.ToString();
@@ -468,7 +580,7 @@ public partial class MainWindow : Window
 
     private void BtnRegWrite_Click(object sender, RoutedEventArgs e)
     {
-        if (!_connected || _master == null) return;
+        if (!_connected) return;
         try
         {
             ushort addr = Convert.ToUInt16(TxtRegAddr.Text, 16);
