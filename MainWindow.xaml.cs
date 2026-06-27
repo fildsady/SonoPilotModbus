@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private bool _connected;
     private bool _suppressVolEvent;
     private bool _suppressRepeatEvent;
+    private DateTime _lastWriteTime = DateTime.MinValue;
     private bool _monoState;
     private bool _autoplayState = true;
     private static readonly int[] BaudTable = { 9600, 19200, 38400, 57600, 115200, 230400, 460800 };
@@ -33,12 +34,20 @@ public partial class MainWindow : Window
     const ushort REG_SD_OK       = 0x0007;
     const ushort REG_COMMAND     = 0x0010;
     const ushort REG_GOTO_INDEX  = 0x0011;
+    const ushort REG_SIGGEN_CMD  = 0x0012;
+    const ushort REG_SIGGEN_TYPE = 0x0013;
+    const ushort REG_SIGGEN_FREQ = 0x0014;
+    const ushort REG_RTC_YEAR    = 0x0015;
+    const ushort REG_RTC_SEC     = 0x001A;
     const ushort REG_UPTIME      = 0x0020;
     const ushort REG_TEMP_X10    = 0x0021;
+    const ushort REG_FW_MAJOR    = 0x0022;
+    const ushort REG_FW_MINOR    = 0x0023;
     const ushort REG_HEAP_FREE   = 0x0025;
-    const ushort REG_TRACK_NAME  = 0x0100;
     const ushort REG_SAMPLE_RATE = 0x0026;
     const ushort REG_BAUDRATE    = 0x0027;
+    const ushort REG_SNAPSHOT    = 0x0040;
+    const ushort REG_TRACK_NAME  = 0x0100;
 
     private static readonly string SettingsPath =
         Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.txt");
@@ -159,8 +168,8 @@ public partial class MainWindow : Window
             }
             _port.Open();
             _master = ModbusSerialMaster.CreateRtu(_port);
-            _master.Transport.ReadTimeout = 1000;
-            _master.Transport.Retries = 1;
+            _master.Transport.ReadTimeout = 500;
+            _master.Transport.Retries = 0;
 
             _rts485 = ChkRts485.IsChecked == true;
             _connected = true;
@@ -195,29 +204,39 @@ public partial class MainWindow : Window
         Log("Disconnected");
     }
 
+    static readonly string[] StateNames = ["Stop", "Play", "Error", "Pause"];
+    static readonly string[] RepeatNames = ["All", "One", "Off", "Single", "Random"];
+    static readonly string[] FormatNames = ["—", "MP3", "WAV", "FLAC"];
+    private int _pollCycle;
+
     private async void PollTimer_Tick(object? sender, EventArgs e)
     {
         if (!_connected || _master == null) return;
+        if ((DateTime.Now - _lastWriteTime).TotalMilliseconds < 600) return;
 
         try
         {
+            // Status + settings: 0x0000-0x0008 (9 regs)
             var regs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_STATE, 9); Rts485Post(); return r; } });
 
-            string[] states = ["Stop", "Play", "Error", "Pause"];
-            string[] repeats = ["All", "One", "Off", "Single", "Random"];
-
             int state = regs[0];
-            TxtState.Text = $"State: {(state < states.Length ? states[state] : "?")}";
+            _lastState = state;
+            TxtState.Text = $"State: {(state < StateNames.Length ? StateNames[state] : "?")}";
+            BtnPlayPause.Content = state == 1 ? "⏸ Pause" : "▶ Play";
             TxtTrack.Text = $"Track: {regs[1] + 1}/{regs[2]}";
 
             _suppressVolEvent = true;
             TxtVolume.Text = $"Volume: {regs[3]}%";
-            if (!SliderVol.IsMouseCaptureWithin) SliderVol.Value = regs[3];
-            TxtVol.Text = $"{regs[3]}%";
+            if (!SliderVol.IsMouseCaptureWithin &&
+                (DateTime.Now - _lastVolWrite).TotalMilliseconds > 1000)
+            {
+                SliderVol.Value = regs[3];
+                TxtVol.Text = $"{regs[3]}%";
+            }
             _suppressVolEvent = false;
 
             int rep = regs[4];
-            TxtRepeat.Text = $"Repeat: {(rep < repeats.Length ? repeats[rep] : "?")}";
+            TxtRepeat.Text = $"Repeat: {(rep < RepeatNames.Length ? RepeatNames[rep] : "?")}";
             _suppressRepeatEvent = true;
             if (rep < CmbRepeat.Items.Count) CmbRepeat.SelectedIndex = rep;
             _suppressRepeatEvent = false;
@@ -228,16 +247,33 @@ public partial class MainWindow : Window
             BtnAutoplay.Content = _autoplayState ? "Auto: On" : "Auto: Off";
             TxtSD.Text = $"SD: {(regs[7] != 0 ? "OK" : "—")}";
 
-            var info = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 2); Rts485Post(); return r; } });
+            // Info: temp, sample rate, track name
+            var info = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_UPTIME, 8); Rts485Post(); return r; } });
             TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
             TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
+            TxtFwVer.Text = $"FW: {info[2]}.{info[3]}";
+            TxtHeap.Text = $"Heap: {info[5] * 16 / 1024}KB";
+            uint sampleRate = (uint)info[6] * 100;
 
-            var sr = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_SAMPLE_RATE, 1); Rts485Post(); return r; } });
-            uint sampleRate = (uint)sr[0] * 100;
+            // RTC
+            try
+            {
+                var rtc = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_RTC_YEAR, 6); Rts485Post(); return r; } });
+                string[] dayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+                string dow = "";
+                try { dow = dayNames[(int)new DateTime(rtc[0], rtc[1], rtc[2]).DayOfWeek] + " "; } catch { }
+                string rtcText = rtc[0] >= 2020
+                    ? $"RTC: {dow}{rtc[2]:D2}/{rtc[1]:D2}/{rtc[0]} {rtc[3]:D2}:{rtc[4]:D2}:{rtc[5]:D2}"
+                    : "RTC: no sync";
+                TxtRtcTime.Text = rtcText;
+                TxtRtcDisplay.Text = rtcText;
+            }
+            catch { TxtRtcDisplay.Text = "RTC: --"; }
 
-            var name = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); Rts485Post(); return r; } });
+            // Track name
+            var nameRegs = await Task.Run(() => { lock (_modbusLock) { Rts485Pre(); var r = _master.ReadHoldingRegisters(_slaveId, REG_TRACK_NAME, 16); Rts485Post(); return r; } });
             var sb = new StringBuilder();
-            foreach (var r in name)
+            foreach (var r in nameRegs)
             {
                 char hi = (char)(r >> 8);
                 char lo = (char)(r & 0xFF);
@@ -251,6 +287,7 @@ public partial class MainWindow : Window
             int dot = trackName.LastIndexOf('.');
             if (dot >= 0) ext = trackName[(dot + 1)..].ToUpper();
             TxtFormat.Text = sampleRate > 0 ? $"{ext} {sampleRate / 1000}kHz" : "—";
+            TxtElapsed.Text = "";
         }
         catch (Exception ex)
         {
@@ -267,6 +304,7 @@ public partial class MainWindow : Window
     private void WriteReg(ushort addr, ushort value)
     {
         if (!_connected || _master == null) return;
+        _lastWriteTime = DateTime.Now;
         Task.Run(() =>
         {
             lock (_modbusLock)
@@ -276,29 +314,56 @@ public partial class MainWindow : Window
                     Rts485Pre();
                     _master!.WriteSingleRegister(_slaveId, addr, value);
                     Rts485Post();
-                    Dispatcher.BeginInvoke(() => Log($"Write [0x{addr:X4}] = {value}"));
                 }
-                catch (Exception ex)
+                catch
                 {
                     Rts485Post();
-                    Dispatcher.BeginInvoke(() => Log($"Write failed: {ex.Message}"));
+                }
+            }
+        });
+    }
+
+    private void WriteRegs(ushort addr, ushort[] values)
+    {
+        if (!_connected || _master == null) return;
+        _lastWriteTime = DateTime.Now;
+        Task.Run(() =>
+        {
+            lock (_modbusLock)
+            {
+                try
+                {
+                    Rts485Pre();
+                    _master!.WriteMultipleRegisters(_slaveId, addr, values);
+                    Rts485Post();
+                }
+                catch
+                {
+                    Rts485Post();
                 }
             }
         });
     }
 
     // Control buttons
-    private void BtnPlay_Click(object sender, RoutedEventArgs e) => WriteReg(REG_COMMAND, 1);
+    private int _lastState;
+    private void BtnPlayPause_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastState == 1) WriteReg(REG_COMMAND, 5);  // playing → pause
+        else WriteReg(REG_COMMAND, 1);                   // stop/pause → play
+    }
     private void BtnStop_Click(object sender, RoutedEventArgs e) => WriteReg(REG_COMMAND, 2);
     private void BtnNext_Click(object sender, RoutedEventArgs e) => WriteReg(REG_COMMAND, 3);
     private void BtnPrev_Click(object sender, RoutedEventArgs e) => WriteReg(REG_COMMAND, 4);
-    private void BtnPause_Click(object sender, RoutedEventArgs e) => WriteReg(REG_COMMAND, 5);
 
+    private DateTime _lastVolWrite = DateTime.MinValue;
     private void SliderVol_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (TxtVol == null) return;
         TxtVol.Text = $"{(int)SliderVol.Value}%";
-        if (_suppressVolEvent || !SliderVol.IsMouseCaptureWithin) return;
+        if (_suppressVolEvent) return;
+        if ((DateTime.Now - _lastVolWrite).TotalMilliseconds < 100) return;
+        _lastVolWrite = DateTime.Now;
         WriteReg(REG_VOLUME, (ushort)SliderVol.Value);
     }
 
@@ -356,6 +421,32 @@ public partial class MainWindow : Window
                 }
             }
         });
+    }
+
+    // Signal Generator — set type+freq first, then start
+    private void BtnSigStart_Click(object sender, RoutedEventArgs e)
+    {
+        ushort type = (ushort)(CmbSigType.SelectedIndex + 1);
+        if (!ushort.TryParse(TxtSigFreq.Text, out ushort freq)) freq = 1000;
+        WriteReg(REG_SIGGEN_TYPE, type);
+        WriteReg(REG_SIGGEN_FREQ, freq);
+        WriteReg(REG_SIGGEN_CMD, 1);
+    }
+
+    private void BtnSigStop_Click(object sender, RoutedEventArgs e)
+    {
+        WriteReg(REG_SIGGEN_CMD, 0);
+    }
+
+    // RTC Sync
+    private void BtnRtcSync_Click(object sender, RoutedEventArgs e)
+    {
+        var now = DateTime.Now;
+        WriteRegs(REG_RTC_YEAR, [
+            (ushort)now.Year, (ushort)now.Month, (ushort)now.Day,
+            (ushort)now.Hour, (ushort)now.Minute, (ushort)now.Second
+        ]);
+        Log($"RTC sync: {now:yyyy-MM-dd HH:mm:ss}");
     }
 
     // Raw register
