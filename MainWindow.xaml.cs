@@ -223,6 +223,7 @@ public partial class MainWindow : Window
         {
             // Status + settings: 0x0000-0x0008 (9 regs)
             var regs = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_STATE, 9); return r; } });
+            if (regs.Length < 9) return;
 
             int state = regs[0];
             _lastState = state;
@@ -254,6 +255,7 @@ public partial class MainWindow : Window
 
             // Info: temp, sample rate, track name
             var info = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_UPTIME, 8); return r; } });
+            if (info.Length < 8) return;
             TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
             TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
             TxtFwVer.Text = $"FW: {info[2]}.{info[3]}";
@@ -277,6 +279,7 @@ public partial class MainWindow : Window
 
             // Track name
             var nameRegs = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs( REG_TRACK_NAME, 16); return r; } });
+            if (nameRegs.Length < 1) return;
             var sb = new StringBuilder();
             foreach (var r in nameRegs)
             {
