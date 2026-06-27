@@ -46,6 +46,7 @@ public partial class MainWindow : Window
     const ushort REG_HEAP_FREE   = 0x0025;
     const ushort REG_SAMPLE_RATE = 0x0026;
     const ushort REG_BAUDRATE    = 0x0027;
+    const ushort REG_UPTIME_HI  = 0x0028;
     const ushort REG_SNAPSHOT    = 0x0040;
     const ushort REG_TRACK_NAME  = 0x0100;
 
@@ -253,7 +254,14 @@ public partial class MainWindow : Window
             var info = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs(REG_UPTIME, 8); return r; } });
             if (info.Length >= 8)
             {
-                TxtUptime.Text = $"Uptime: {info[0] / 60}m{info[0] % 60}s";
+                var upHi = await Task.Run(() => { lock (_modbusLock) { var r = ReadRegs(REG_UPTIME_HI, 1); return r; } });
+                uint upSec = (uint)info[0];
+                if (upHi.Length >= 1) upSec |= (uint)upHi[0] << 16;
+                int d = (int)(upSec / 86400);
+                int h = (int)(upSec % 86400 / 3600);
+                int m = (int)(upSec % 3600 / 60);
+                int s = (int)(upSec % 60);
+                TxtUptime.Text = $"Up: {d}d {h:D2}:{m:D2}:{s:D2}";
                 TxtTemp.Text = $"Temp: {info[1] / 10.0:F1}°C";
                 TxtFwVer.Text = $"FW: {info[2]}.{info[3]}";
                 TxtHeap.Text = $"Heap: {info[5] * 16 / 1024}KB";
