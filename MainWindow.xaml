@@ -44,8 +44,6 @@
                     <Button Content="⟳" Click="BtnRefresh_Click" Width="28"/>
                     <CheckBox x:Name="ChkRts485" Content="RS-485" VerticalAlignment="Center" Margin="6,0,0,0"
                               Foreground="{StaticResource CatSubtext0}"/>
-                    <CheckBox x:Name="ChkBridge" Content="Bridge" VerticalAlignment="Center" Margin="6,0,0,0"
-                              Foreground="{StaticResource CatSubtext0}"/>
                 </WrapPanel>
                 <WrapPanel Margin="0,3,0,0">
                     <TextBlock Text="Baud:" VerticalAlignment="Center" Margin="0,0,4,0"/>
@@ -78,7 +76,6 @@
                         <TextBlock x:Name="TxtTrack" Text="Track: —"/>
                         <TextBlock x:Name="TxtVolume" Text="Volume: —"/>
                         <TextBlock x:Name="TxtRepeat" Text="Repeat: —"/>
-                        <TextBlock x:Name="TxtElapsed" Text="Elapsed: —"/>
                     </StackPanel>
                     <StackPanel Grid.Column="1">
                         <TextBlock x:Name="TxtUptime" Text="Uptime: —"/>
