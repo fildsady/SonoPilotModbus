@@ -57,6 +57,14 @@
                         <ComboBoxItem Content="460800"/>
                     </ComboBox>
                     <Button Content="Set Device" Click="BtnSetBaud_Click" Margin="4,0,0,0"/>
+                    <TextBlock Text=" Poll:" VerticalAlignment="Center" Margin="4,0,2,0" Foreground="{StaticResource CatSubtext0}"/>
+                    <ComboBox x:Name="CmbPollRate" Width="68" Height="24" SelectedIndex="2" SelectionChanged="CmbPollRate_Changed">
+                        <ComboBoxItem Content="100ms"/>
+                        <ComboBoxItem Content="250ms"/>
+                        <ComboBoxItem Content="500ms"/>
+                        <ComboBoxItem Content="1s"/>
+                        <ComboBoxItem Content="2s"/>
+                    </ComboBox>
                     <TextBlock x:Name="TxtStatus" Text="Disconnected" Foreground="{StaticResource CatRed}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                 </WrapPanel>
             </StackPanel>
@@ -167,14 +175,38 @@
             </StackPanel>
         </Border>
 
-        <!-- Log -->
-        <Border Grid.Row="3" Background="{StaticResource CatSurface0}" CornerRadius="8" Padding="8">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Top" Text="Log" FontWeight="Bold" Foreground="{StaticResource CatSubtext0}" Margin="0,0,0,4"/>
-                <TextBox x:Name="TxtLog" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
-                         Background="#181825" Foreground="{StaticResource CatSubtext0}" FontFamily="Cascadia Mono,Consolas"
-                         FontSize="11" TextWrapping="Wrap" BorderThickness="0"/>
-            </DockPanel>
-        </Border>
+        <!-- Log + Register Map -->
+        <TabControl Grid.Row="3" Background="{StaticResource CatSurface0}" BorderThickness="0" Margin="0">
+            <TabItem Header="Log" Foreground="{StaticResource CatText}">
+                <DockPanel Margin="8">
+                    <Button DockPanel.Dock="Top" Content="Clear" Click="BtnClear_Click" Padding="6,2" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                    <TextBox x:Name="TxtLog" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                             Background="#181825" Foreground="{StaticResource CatSubtext0}" FontFamily="Cascadia Mono,Consolas"
+                             FontSize="11" TextWrapping="Wrap" BorderThickness="0"/>
+                </DockPanel>
+            </TabItem>
+            <TabItem Header="Register Map" Foreground="{StaticResource CatText}">
+                <DockPanel Margin="8">
+                    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                        <Button Content="Read All" Click="BtnRegMapRead_Click" Padding="6,2"/>
+                        <TextBlock x:Name="TxtRegMapStatus" Text="" Foreground="{StaticResource CatSubtext0}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    </WrapPanel>
+                    <DataGrid x:Name="DgRegMap" AutoGenerateColumns="False" IsReadOnly="True"
+                              Background="#181825" Foreground="{StaticResource CatText}"
+                              GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              BorderThickness="0" RowBackground="#181825" AlternatingRowBackground="#1e1e2e"
+                              CanUserSortColumns="False" SelectionMode="Single">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Addr" Binding="{Binding Addr}" Width="55"/>
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="110"/>
+                            <DataGridTextColumn Header="Hex" Binding="{Binding Value}" Width="55"/>
+                            <DataGridTextColumn Header="Dec" Binding="{Binding Dec}" Width="50"/>
+                            <DataGridTextColumn Header="R/W" Binding="{Binding RW}" Width="35"/>
+                            <DataGridTextColumn Header="Description" Binding="{Binding Desc}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </TabItem>
+        </TabControl>
     </Grid>
 </Window>

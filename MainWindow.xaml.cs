@@ -113,7 +113,7 @@ public partial class MainWindow : Window
         {
             string port = CmbPort.SelectedItem?.ToString() ?? "";
             string rts = ChkRts485.IsChecked == true ? "1" : "0";
-            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text},{rts},{CmbBaud.SelectedIndex}");
+            File.WriteAllText(SettingsPath, $"{port},{TxtSlaveId.Text},{rts},{CmbBaud.SelectedIndex},{CmbPollRate.SelectedIndex}");
         }
         catch { }
     }
@@ -134,6 +134,8 @@ public partial class MainWindow : Window
             if (parts.Length >= 3) ChkRts485.IsChecked = parts[2] == "1";
             if (parts.Length >= 4 && int.TryParse(parts[3], out int bi) && bi >= 0 && bi < BaudTable.Length)
                 CmbBaud.SelectedIndex = bi;
+            if (parts.Length >= 5 && int.TryParse(parts[4], out int pi) && pi >= 0 && pi < PollRates.Length)
+                CmbPollRate.SelectedIndex = pi;
         }
         catch { }
     }
@@ -490,6 +492,68 @@ public partial class MainWindow : Window
         string ts = DateTime.Now.ToString("HH:mm:ss");
         TxtLog.AppendText($"[{ts}] {msg}\n");
         TxtLog.ScrollToEnd();
+    }
+
+    private void BtnClear_Click(object sender, RoutedEventArgs e) => TxtLog.Clear();
+
+    static readonly int[] PollRates = [100, 250, 500, 1000, 2000];
+    private void CmbPollRate_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        int idx = CmbPollRate.SelectedIndex;
+        if (idx >= 0 && idx < PollRates.Length && _pollTimer != null)
+            _pollTimer.Interval = TimeSpan.FromMilliseconds(PollRates[idx]);
+        SaveSettings();
+    }
+
+    // ── Register Map ────────────────────────────────────────────
+    public class RegEntry { public string Addr { get; set; } = ""; public string Name { get; set; } = ""; public string Value { get; set; } = "—"; public string Dec { get; set; } = ""; public string RW { get; set; } = ""; public string Desc { get; set; } = ""; public ushort RawAddr; }
+
+    private readonly List<RegEntry> _regMap = new()
+    {
+        new() { RawAddr=0x0000, Addr="0x0000", Name="STATE", RW="RO", Desc="0=stop 1=play 3=pause" },
+        new() { RawAddr=0x0001, Addr="0x0001", Name="TRACK", RW="RO", Desc="track index" },
+        new() { RawAddr=0x0002, Addr="0x0002", Name="TRACK_COUNT", RW="RO", Desc="total tracks" },
+        new() { RawAddr=0x0003, Addr="0x0003", Name="VOLUME", RW="RW", Desc="0-100" },
+        new() { RawAddr=0x0004, Addr="0x0004", Name="REPEAT", RW="RW", Desc="0=All 1=One 2=Off 3=Single 4=Random" },
+        new() { RawAddr=0x0005, Addr="0x0005", Name="MONO", RW="RW", Desc="0=stereo 1=mono" },
+        new() { RawAddr=0x0006, Addr="0x0006", Name="AUTOPLAY", RW="RW", Desc="0=off 1=on" },
+        new() { RawAddr=0x0007, Addr="0x0007", Name="SD_OK", RW="RO", Desc="0=no SD 1=ok" },
+        new() { RawAddr=0x0010, Addr="0x0010", Name="COMMAND", RW="WO", Desc="1=play 2=stop 3=next 4=prev 5=pause" },
+        new() { RawAddr=0x0012, Addr="0x0012", Name="SIGGEN_CMD", RW="RW", Desc="0=stop 1=start" },
+        new() { RawAddr=0x0013, Addr="0x0013", Name="SIGGEN_TYPE", RW="RW", Desc="1=Sine..6=Pink" },
+        new() { RawAddr=0x0014, Addr="0x0014", Name="SIGGEN_FREQ", RW="RW", Desc="1-20000 Hz" },
+        new() { RawAddr=0x0020, Addr="0x0020", Name="UPTIME", RW="RO", Desc="seconds low 16-bit" },
+        new() { RawAddr=0x0021, Addr="0x0021", Name="TEMP_X10", RW="RO", Desc="temp × 10" },
+        new() { RawAddr=0x0022, Addr="0x0022", Name="FW_MAJOR", RW="RO", Desc="firmware major" },
+        new() { RawAddr=0x0023, Addr="0x0023", Name="FW_MINOR", RW="RO", Desc="firmware minor" },
+        new() { RawAddr=0x0025, Addr="0x0025", Name="HEAP_FREE", RW="RO", Desc="heap ÷ 16" },
+        new() { RawAddr=0x0026, Addr="0x0026", Name="SAMPLE_RATE", RW="RO", Desc="rate ÷ 100" },
+        new() { RawAddr=0x0027, Addr="0x0027", Name="BAUDRATE", RW="RW", Desc="baud index 0-6" },
+        new() { RawAddr=0x0028, Addr="0x0028", Name="UPTIME_HI", RW="RO", Desc="seconds high 16-bit" },
+    };
+    private bool _regMapInit;
+
+    private async void BtnRegMapRead_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_regMapInit) { DgRegMap.ItemsSource = _regMap; _regMapInit = true; }
+        if (!_connected || _master == null) return;
+        try
+        {
+            var b0 = await Task.Run(() => { lock (_modbusLock) { return ReadRegs(0x0000, 9); } });
+            var b1 = await Task.Run(() => { lock (_modbusLock) { return ReadRegs(0x0012, 3); } });
+            var b2 = await Task.Run(() => { lock (_modbusLock) { return ReadRegs(0x0020, 9); } });
+            foreach (var reg in _regMap)
+            {
+                ushort? val = null;
+                if (reg.RawAddr <= 0x0008 && b0 != null && reg.RawAddr < b0.Length) val = b0[reg.RawAddr];
+                else if (reg.RawAddr >= 0x0012 && reg.RawAddr <= 0x0014 && b1 != null) val = b1[reg.RawAddr - 0x0012];
+                else if (reg.RawAddr >= 0x0020 && reg.RawAddr <= 0x0028 && b2 != null && reg.RawAddr - 0x0020 < b2.Length) val = b2[reg.RawAddr - 0x0020];
+                if (val.HasValue) { reg.Value = $"0x{val:X4}"; reg.Dec = $"{val}"; }
+            }
+            DgRegMap.Items.Refresh();
+            TxtRegMapStatus.Text = $"OK ({DateTime.Now:HH:mm:ss})";
+        }
+        catch (Exception ex) { TxtRegMapStatus.Text = $"Error: {ex.Message}"; }
     }
 
     protected override void OnClosed(EventArgs e)
